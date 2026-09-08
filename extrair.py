@@ -108,7 +108,7 @@ def buscar_dados_atuais_firebase(id_jogo):
     return {}
 
 def extrair_id_jogo(url_origem):
-    """Extrai o ID limpo ignorando categorias, parâmetros do Apkvision/24hmod e números de versão."""
+    """Extrai o ID limpo ignorando categorias, parâmetros e versões."""
     url_limpa = url_origem.split(']')[0].split('?')[0].rstrip('/')
     partes = [p for p in url_limpa.split('/') if p]
     
@@ -123,7 +123,6 @@ def extrair_id_jogo(url_origem):
         p_lower = p.lower()
         if p_lower in ignorar or p_lower.isdigit():
             continue
-        # Se for padrão de versão (ex: v0.4.8-apk, v2.737.1584), pula
         if re.match(r'^v?\d+\.\d+', p_lower):
             continue
         partes_validas.append(p)
@@ -133,7 +132,6 @@ def extrair_id_jogo(url_origem):
     else:
         id_jogo = "jogo"
         
-    # Remove sufixos comuns do Apkvision e 24hmod (ex: -apk-34296, -16688, -apk)
     id_jogo = re.sub(r'-apk-\d+.*$', '', id_jogo, flags=re.IGNORECASE)
     id_jogo = re.sub(r'-\d+$', '', id_jogo)
     id_jogo = re.sub(r'-(?:apk|mod)$', '', id_jogo, flags=re.IGNORECASE)
@@ -231,7 +229,7 @@ def extrair_link_direto(url_alvo):
             if not url.startswith("blob:") and "play.google.com" not in url:
                 if "dl.24hmod.com" in url or "file.24hmod.com" in url or "file.apkvision.org" in url or "downloads.apkvision.org" in url:
                     link_final = url
-                elif url.endswith(".apk") or url.endswith(".xapk") or ".apk?" in url or ".xapk?" in url:
+                elif (url.endswith(".apk") or url.endswith(".xapk") or ".apk?" in url or ".xapk?" in url) and "apkvision.org/games" not in url:
                     link_final = url
 
         page.on("request", interceptar_requisicao)
@@ -250,11 +248,14 @@ def extrair_link_direto(url_alvo):
                 if not full_title:
                     full_title = page.title()
 
+                # Remove palavras iniciais como Download / Baixar
+                full_title = re.sub(r'^(?:Download|Baixar)\s+', '', full_title, flags=re.IGNORECASE)
+
                 match_v = re.search(r'(?:v|ver|version)?\s*(\d+\.\d+(?:\.\d+)*)', full_title, re.IGNORECASE)
                 if match_v:
                     dados_jogo["versao"] = f"v{match_v.group(1)}"
 
-                nome_limpo = re.split(r'\s+(?:MOD|v?\d+\.\d+|\(|-|–|Download|APK|XAPK)', full_title, flags=re.IGNORECASE)[0].strip()
+                nome_limpo = re.split(r'\s+(?:MOD|v?\d+\.\d+|\(|-|–|APK|XAPK)', full_title, flags=re.IGNORECASE)[0].strip()
                 nome_limpo = re.sub(r'24hmod\.com|24hmod|apkvision\.org|apkvision', '', nome_limpo, flags=re.IGNORECASE).strip()
 
                 if nome_limpo and len(nome_limpo) > 1:
@@ -294,24 +295,28 @@ def extrair_link_direto(url_alvo):
                         btn_dl.click(force=True)
                         page.wait_for_timeout(4000)
 
-                print("⏳ Aguardando contador do Apkvision (8s)...")
-                page.wait_for_timeout(8000)
+                print("⏳ Aguardando contador do Apkvision (10s)...")
+                page.wait_for_timeout(10000)
 
-                btn_final = page.locator("a[href*='apkvision'], a[href*='.apk'], a[href*='.xapk'], a.btn-file").first
+                # Busca apenas pelo botão de arquivo direto
+                btn_final = page.locator("a.btn-file, a[href*='file.apkvision.org'], a[href*='downloads.apkvision.org']").first
                 if btn_final.count() > 0:
                     href = btn_final.get_attribute("href")
-                    if href and ("http" in href or ".apk" in href or ".xapk" in href):
+                    if href and ("file.apkvision.org" in href or "downloads.apkvision.org" in href or ".apk" in href or ".xapk" in href):
                         link_final = href
                     else:
                         btn_final.click(force=True)
                         page.wait_for_timeout(5000)
 
-            # Varredura final no DOM se o link não foi pego no evento de rede
+            # Varredura final no DOM
             if not link_final:
                 hrefs = page.eval_on_selector_all("a[href]", "elements => elements.map(e => e.href)")
                 for href in hrefs:
                     if "yandex" not in href and "cdn-cgi" not in href and not href.startswith("blob:"):
-                        if "dl.24hmod.com" in href or "file.24hmod.com" in href or "apkvision" in href or href.endswith(".apk"):
+                        if any(k in href for k in ["dl.24hmod.com", "file.24hmod.com", "file.apkvision.org", "downloads.apkvision.org"]):
+                            link_final = href
+                            break
+                        elif (href.endswith(".apk") or href.endswith(".xapk")) and "apkvision.org/games" not in href:
                             link_final = href
                             break
 
