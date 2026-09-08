@@ -108,12 +108,14 @@ def buscar_dados_atuais_firebase(id_jogo):
     return {}
 
 def extrair_id_jogo(url_origem):
+    """Extrai o ID limpo do jogo no 24hmod (ex: /download/fr-legends-16688/1 -> fr-legends)"""
     url_limpa = url_origem.split(']')[0].rstrip('/')
-    partes = url_limpa.split('/')
+    url_limpa = re.sub(r'/\d+$', '', url_limpa)  # Remove /1, /2 no final
     
+    partes = url_limpa.split('/')
     partes_filtradas = [
         p for p in partes 
-        if p and p not in ['download', 'file', 'games', 'action', 'racing', 'simulation'] and not p.isdigit()
+        if p and p not in ['download', 'file', 'games', 'https:', 'http:', '24hmod.com', 'apkvision.org'] and not p.isdigit()
     ]
     
     if partes_filtradas:
@@ -121,8 +123,9 @@ def extrair_id_jogo(url_origem):
     else:
         id_jogo = "jogo"
         
-    id_jogo = re.sub(r'-(?:apk|mod)?-\d+.*$', '', id_jogo, flags=re.IGNORECASE)
     id_jogo = id_jogo.replace('.html', '').replace('.apk', '')
+    id_jogo = re.sub(r'-\d+$', '', id_jogo)  # Remove ID do post tipo -16688
+    id_jogo = re.sub(r'-(?:apk|mod)$', '', id_jogo, flags=re.IGNORECASE)
     return id_jogo
 
 def salvar_no_firebase_se_novo(url_origem, link_novo, dados_jogo):
@@ -154,7 +157,7 @@ def salvar_no_firebase_se_novo(url_origem, link_novo, dados_jogo):
         res1 = requests.patch(f"{firebase_base_url}/links/{id_jogo}.json", json=payload)
         requests.patch(f"{firebase_base_url}/jogos/{id_jogo}.json", json=payload)
         if res1.status_code == 200:
-            print(f"✅ Link e versão atualizados no Firebase para: {id_jogo}")
+            print(f"✅ Link e versão atualizados no Firebase para: {id_jogo} (ID Firebase: {id_jogo})")
             enviar_notificacao_telegram(nome_jogo, versao_jogo, id_jogo)
             enviar_notificacao_whatsapp(nome_jogo, versao_jogo, id_jogo)
     except Exception as e:
@@ -213,9 +216,9 @@ def extrair_link_direto(url_alvo):
                 return
 
             if not url.startswith("blob:") and "play.google.com" not in url:
-                if url.endswith(".apk") or url.endswith(".xapk") or ".apk?" in url or ".xapk?" in url:
+                if "dl.24hmod.com" in url or "file.24hmod.com" in url:
                     link_final = url
-                elif "dl.24hmod.com" in url or "file.apkvision.org" in url or "downloads.apkvision.org" in url:
+                elif url.endswith(".apk") or url.endswith(".xapk") or ".apk?" in url:
                     link_final = url
 
         page.on("request", interceptar_requisicao)
@@ -224,7 +227,7 @@ def extrair_link_direto(url_alvo):
             page.goto(url_alvo, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(4000)
 
-            # EXTRAÇÃO DE NOME E VERSÃO
+            # Extração de Nome e Versão
             try:
                 full_title = ""
                 og_elem = page.locator('meta[property="og:title"]').first
@@ -238,8 +241,8 @@ def extrair_link_direto(url_alvo):
                 if match_v:
                     dados_jogo["versao"] = f"v{match_v.group(1)}"
 
-                nome_limpo = re.split(r'\s+(?:MOD|v?\d+\.\d+|\(|-|–|Download|APK|XAPK)', full_title, flags=re.IGNORECASE)[0].strip()
-                nome_limpo = re.sub(r'24hmod\.com|24hmod|apkvision\.org|apkvision', '', nome_limpo, flags=re.IGNORECASE).strip()
+                nome_limpo = re.split(r'\s+(?:MOD|v?\d+\.\d+|\(|-|–|Download|APK)', full_title, flags=re.IGNORECASE)[0].strip()
+                nome_limpo = re.sub(r'24hmod\.com|24hmod', '', nome_limpo, flags=re.IGNORECASE).strip()
 
                 if nome_limpo and len(nome_limpo) > 1:
                     dados_jogo["nome"] = nome_limpo
@@ -250,41 +253,32 @@ def extrair_link_direto(url_alvo):
             except Exception as err_meta:
                 print(f"⚠️ Erro ao extrair metadados: {err_meta}")
 
-            # TRATAMENTO 24HMOD.COM
-            if "24hmod.com" in url_alvo:
-                print("Aguardando carregamento de arquivo do 24hmod...")
-                page.wait_for_timeout(9000)
-                btn_now = page.locator("a:has-text('Download Now'), button:has-text('Download Now')").first
-                if btn_now.count() > 0:
-                    btn_now.click(force=True)
-                    page.wait_for_timeout(5000)
+            # FLUXO ESPECÍFICO DO 24HMOD.COM
+            print("⏳ Aguardando contador e botões do 24hmod...")
+            page.wait_for_timeout(10000)
 
-            # TRATAMENTO APKVISION.ORG
-            elif "apkvision.org" in url_alvo:
-                print("Iniciando fluxo Apkvision...")
-                btn_mod = page.locator("a.btn-download, a[href*='/download/']").first
-                if btn_mod.count() > 0 and "/download/" not in page.url:
-                    btn_mod.click(force=True)
-                    page.wait_for_timeout(4000)
-
-                print("Aguardando contador do Apkvision...")
-                page.wait_for_timeout(7000)
-
-                btn_final = page.locator("a[href*='.apk'], a[href*='.xapk'], a.btn-file").first
-                if btn_final.count() > 0:
-                    href = btn_final.get_attribute("href")
-                    if href and ("http" in href or ".apk" in href or ".xapk" in href):
-                        link_final = href
-                    else:
-                        btn_final.click(force=True)
+            # Procura o botão de download na página
+            botoes = page.locator("a, button").all()
+            for b in botoes:
+                try:
+                    texto = (b.inner_text() or "").lower()
+                    href = b.get_attribute("href") or ""
+                    if ("download" in texto or "download" in href or "dl.24hmod.com" in href) and "play.google.com" not in href:
+                        if "dl.24hmod.com" in href or href.endswith(".apk"):
+                            link_final = href
+                            break
+                        b.click(force=True, timeout=4000)
                         page.wait_for_timeout(5000)
+                        break
+                except:
+                    continue
 
-            # Varredura final no DOM
+            # Varredura final no código da página (DOM)
             if not link_final:
                 hrefs = page.eval_on_selector_all("a[href]", "elements => elements.map(e => e.href)")
                 for href in hrefs:
                     if "yandex" not in href and "cdn-cgi" not in href and not href.startswith("blob:"):
-                        if href.endswith(".apk") or href.endswith(".xapk") or "dl.24hmod.com" in href or "apkvision.org/file" in href:
+                        if "dl.24hmod.com" in href or "file.24hmod.com" in href or href.endswith(".apk"):
                             link_final = href
                             break
 
@@ -319,9 +313,16 @@ def processar_jogo(url_alvo):
         print(f"❌ Nenhum link direto encontrado para: {url_alvo}")
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1].startswith("http"):
-        url_single = sys.argv[1]
-        processar_jogo(url_single)
+    if len(sys.argv) > 1 and sys.argv[1].strip():
+        raw_input = sys.argv[1]
+        # Extrai todas as URLs do texto mesmo se coladas juntas
+        urls_encontradas = re.findall(r'https?://[^\s,]+', raw_input)
+        
+        if urls_encontradas:
+            for url in urls_encontradas:
+                processar_jogo(url.strip())
+        else:
+            processar_jogo(raw_input.strip())
     else:
         arquivo_jogos = "jogos.txt"
         if os.path.exists(arquivo_jogos):
