@@ -139,6 +139,44 @@ def extrair_id_jogo(url_origem):
     
     return id_jogo
 
+def extrair_versao_limpa(texto_ou_url):
+    """Encontra e retorna a maior versão numérica válida encontrada no texto/URL."""
+    if not texto_ou_url:
+        return None
+    candidatos = re.findall(r'\bv?(\d+\.\d+(?:\.\d+)*)\b', texto_ou_url, re.IGNORECASE)
+    validos = []
+    for c in candidatos:
+        partes = c.split('.')
+        if len(partes) >= 2 and not (len(partes[0]) == 4 and int(partes[0]) > 2000):
+            try:
+                nums = [int(p) for p in partes]
+                validos.append((nums, c))
+            except ValueError:
+                pass
+    if validos:
+        validos.sort(key=lambda x: x[0], reverse=True)
+        return f"v{validos[0][1]}"
+    return None
+
+def limpar_nome_jogo(raw_title, url_alvo):
+    """Limpa o título removendo palavras desnecessárias, marcas e versão."""
+    if not raw_title:
+        id_limpo = extrair_id_jogo(url_alvo)
+        return id_limpo.replace('-', ' ').title()
+
+    nome = re.sub(r'^(?:Download|Baixar|Free)\s+', '', raw_title, flags=re.IGNORECASE)
+    nome = re.sub(r'(?:24hmod\.com|24hmod|apkvision\.org|apkvision)\b', '', nome, flags=re.IGNORECASE)
+    nome = re.sub(r'\bv?\d+\.\d+(?:\.\d+)*\b', '', nome, flags=re.IGNORECASE)
+    nome = re.sub(r'\([^)]*\)', '', nome)
+    nome = re.sub(r'\b(?:MOD|APK|XAPK|Unlimited|Coins|Money)\b', '', nome, flags=re.IGNORECASE)
+    nome = re.sub(r'^[\s\-–|:]+|[\s\-–|:]+$', '', nome).strip()
+
+    if not nome or len(nome) < 2:
+        id_limpo = extrair_id_jogo(url_alvo)
+        return id_limpo.replace('-', ' ').title()
+
+    return nome
+
 def salvar_no_firebase_se_novo(url_origem, link_novo, dados_jogo):
     id_jogo = extrair_id_jogo(url_origem)
 
@@ -238,34 +276,37 @@ def extrair_link_direto(url_alvo):
             page.goto(url_alvo, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(4000)
 
-            # Extração de Nome e Versão
+            # Captura elementos do DOM
+            h1_text = ""
             try:
-                full_title = ""
+                if page.locator("h1").count() > 0:
+                    h1_text = page.locator("h1").first.inner_text() or ""
+            except:
+                pass
+
+            page_title = page.title() or ""
+
+            og_title = ""
+            try:
                 og_elem = page.locator('meta[property="og:title"]').first
                 if og_elem.count() > 0:
-                    full_title = og_elem.get_attribute("content") or ""
+                    og_title = og_elem.get_attribute("content") or ""
+            except:
+                pass
 
-                if not full_title:
-                    full_title = page.title()
+            # 1. EXTRAÇÃO DE VERSÃO (Prioridade: URL -> H1 -> Title -> OG Title)
+            versao_encontrada = (
+                extrair_versao_limpa(url_alvo) or 
+                extrair_versao_limpa(h1_text) or 
+                extrair_versao_limpa(og_title) or 
+                extrair_versao_limpa(page_title)
+            )
+            if versao_encontrada:
+                dados_jogo["versao"] = versao_encontrada
 
-                # Remove palavras iniciais como Download / Baixar
-                full_title = re.sub(r'^(?:Download|Baixar)\s+', '', full_title, flags=re.IGNORECASE)
-
-                match_v = re.search(r'(?:v|ver|version)?\s*(\d+\.\d+(?:\.\d+)*)', full_title, re.IGNORECASE)
-                if match_v:
-                    dados_jogo["versao"] = f"v{match_v.group(1)}"
-
-                nome_limpo = re.split(r'\s+(?:MOD|v?\d+\.\d+|\(|-|–|APK|XAPK)', full_title, flags=re.IGNORECASE)[0].strip()
-                nome_limpo = re.sub(r'24hmod\.com|24hmod|apkvision\.org|apkvision', '', nome_limpo, flags=re.IGNORECASE).strip()
-
-                if nome_limpo and len(nome_limpo) > 1:
-                    dados_jogo["nome"] = nome_limpo
-                else:
-                    id_limpo = extrair_id_jogo(url_alvo)
-                    dados_jogo["nome"] = id_limpo.replace('-', ' ').title()
-
-            except Exception as err_meta:
-                print(f"⚠️ Erro ao extrair metadados: {err_meta}")
+            # 2. EXTRAÇÃO DE NOME (Prioridade: H1 -> OG Title -> Page Title -> ID)
+            raw_title = h1_text or og_title or page_title
+            dados_jogo["nome"] = limpar_nome_jogo(raw_title, url_alvo)
 
             # FLUXO 1: 24HMOD.COM
             if "24hmod.com" in url_alvo:
@@ -298,7 +339,6 @@ def extrair_link_direto(url_alvo):
                 print("⏳ Aguardando contador do Apkvision (10s)...")
                 page.wait_for_timeout(10000)
 
-                # Busca apenas pelo botão de arquivo direto
                 btn_final = page.locator("a.btn-file, a[href*='file.apkvision.org'], a[href*='downloads.apkvision.org']").first
                 if btn_final.count() > 0:
                     href = btn_final.get_attribute("href")
