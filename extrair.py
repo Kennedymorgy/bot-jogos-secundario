@@ -123,7 +123,7 @@ def extrair_id_jogo(url_origem):
         p_lower = p.lower()
         if p_lower in ignorar or p_lower.isdigit():
             continue
-        if re.match(r'^v?\d+\.\d+', p_lower):
+        if re.match(r'^v?\d+[\.\-]\d+', p_lower):
             continue
         partes_validas.append(p)
         
@@ -140,36 +140,49 @@ def extrair_id_jogo(url_origem):
     return id_jogo
 
 def extrair_versao_limpa(texto_ou_url):
-    """Encontra e retorna a maior versão numérica válida encontrada no texto/URL."""
+    """Extrai uma versão válida (ex: v0.4.8) ignorando números de scripts e anos."""
     if not texto_ou_url:
         return None
-    candidatos = re.findall(r'\bv?(\d+\.\d+(?:\.\d+)*)\b', texto_ou_url, re.IGNORECASE)
-    validos = []
+
+    # Normaliza separadores no formato 0-4-8 para 0.4.8
+    texto = re.sub(r'(\d+)-(\d+)-(\d+)', r'\1.\2.\3', texto_ou_url)
+    texto = re.sub(r'(\d+)-(\d+)', r'\1.\2', texto)
+
+    candidatos = re.findall(r'\bv?(\d+\.\d+(?:\.\d+)?)\b', texto, re.IGNORECASE)
+    
     for c in candidatos:
         partes = c.split('.')
-        if len(partes) >= 2 and not (len(partes[0]) == 4 and int(partes[0]) > 2000):
+        if len(partes) >= 2:
             try:
-                nums = [int(p) for p in partes]
-                validos.append((nums, c))
+                major = int(partes[0])
+                # Descarta anos (ex: 2024, 2025, 2026...)
+                if len(partes[0]) == 4 and major >= 2000:
+                    continue
+                # Versões de jogos dificilmente têm o primeiro número maior que 100
+                if major > 100:
+                    continue
+                return f"v{c}"
             except ValueError:
-                pass
-    if validos:
-        validos.sort(key=lambda x: x[0], reverse=True)
-        return f"v{validos[0][1]}"
+                continue
     return None
 
 def limpar_nome_jogo(raw_title, url_alvo):
-    """Limpa o título removendo palavras desnecessárias, marcas e versão."""
+    """Limpa o título removendo palavras de ação, marcas, versão e palavra Download em qualquer posição."""
     if not raw_title:
         id_limpo = extrair_id_jogo(url_alvo)
         return id_limpo.replace('-', ' ').title()
 
-    nome = re.sub(r'^(?:Download|Baixar|Free)\s+', '', raw_title, flags=re.IGNORECASE)
+    nome = raw_title
+    # Remove marcas e domínios
     nome = re.sub(r'(?:24hmod\.com|24hmod|apkvision\.org|apkvision)\b', '', nome, flags=re.IGNORECASE)
-    nome = re.sub(r'\bv?\d+\.\d+(?:\.\d+)*\b', '', nome, flags=re.IGNORECASE)
-    nome = re.sub(r'\([^)]*\)', '', nome)
-    nome = re.sub(r'\b(?:MOD|APK|XAPK|Unlimited|Coins|Money)\b', '', nome, flags=re.IGNORECASE)
-    nome = re.sub(r'^[\s\-–|:]+|[\s\-–|:]+$', '', nome).strip()
+    # Remove palavras desnecessárias em QUALQUER lugar do texto
+    nome = re.sub(r'\b(?:Download|Baixar|Free|MOD|APK|XAPK|Unlimited|Coins|Money|Android)\b', '', nome, flags=re.IGNORECASE)
+    # Remove a versão numérica do nome
+    nome = re.sub(r'\bv?\d+[\.\-]\d+(?:[\.\-]\d+)*\b', '', nome, flags=re.IGNORECASE)
+    # Remove parênteses e colchetes
+    nome = re.sub(r'\([^)]*\)|\[[^\]]*\]', '', nome)
+    # Limpa espaços duplos e caracteres especiais nas bordas
+    nome = re.sub(r'[\s\-–|:]+', ' ', nome).strip()
 
     if not nome or len(nome) < 2:
         id_limpo = extrair_id_jogo(url_alvo)
@@ -185,14 +198,9 @@ def salvar_no_firebase_se_novo(url_origem, link_novo, dados_jogo):
     foto_url = FOTO_OFICIAL_SITE
 
     dados_atuais = buscar_dados_atuais_firebase(id_jogo)
-    link_atual = dados_atuais.get("link_direto") if isinstance(dados_atuais, dict) else None
     versao_atual = dados_atuais.get("versao") if isinstance(dados_atuais, dict) else None
 
-    if link_atual == link_novo and versao_atual == versao_jogo:
-        print(f"⏩ O jogo '{id_jogo}' continua com o mesmo link ({versao_jogo}). Nenhuma notificação enviada.")
-        return id_jogo
-
-    print(f"🔄 Nova versão/link detectado para '{id_jogo}'! ID Firebase: '{id_jogo}'. Atualizando...")
+    # 1. Atualiza SEMPRE os links no Firebase silenciosamente
     firebase_base_url = "https://meublog-apks-default-rtdb.firebaseio.com"
     payload = {
         "url_original": url_origem,
@@ -203,15 +211,21 @@ def salvar_no_firebase_se_novo(url_origem, link_novo, dados_jogo):
     }
 
     try:
-        res1 = requests.patch(f"{firebase_base_url}/links/{id_jogo}.json", json=payload)
+        requests.patch(f"{firebase_base_url}/links/{id_jogo}.json", json=payload)
         requests.patch(f"{firebase_base_url}/jogos/{id_jogo}.json", json=payload)
-        if res1.status_code == 200:
-            print(f"✅ Link e versão atualizados no Firebase para o ID: {id_jogo}")
-            enviar_notificacao_telegram(nome_jogo, versao_jogo, id_jogo)
-            enviar_notificacao_whatsapp(nome_jogo, versao_jogo, id_jogo)
+        print(f"✅ Firebase atualizado para '{id_jogo}' ({versao_jogo}).")
     except Exception as e:
         print(f"❌ Erro ao salvar no Firebase: {e}")
-    
+
+    # 2. REGRA ESTRITA DE NOTIFICAÇÃO:
+    # Só dispara para o Telegram e WhatsApp se a VERSÃO for diferente da gravada no Firebase
+    if versao_atual and versao_atual.strip().lower() == versao_jogo.strip().lower():
+        print(f"⏩ Notificação ignorada: A versão de '{id_jogo}' continua a mesma ({versao_jogo}).")
+    else:
+        print(f"🔔 VERSÃO MUDOU para '{id_jogo}' ({versao_atual} ➔ {versao_jogo})! Enviando notificações...")
+        enviar_notificacao_telegram(nome_jogo, versao_jogo, id_jogo)
+        enviar_notificacao_whatsapp(nome_jogo, versao_jogo, id_jogo)
+
     return id_jogo
 
 def extrair_link_direto(url_alvo):
@@ -294,7 +308,7 @@ def extrair_link_direto(url_alvo):
             except:
                 pass
 
-            # 1. EXTRAÇÃO DE VERSÃO (Prioridade: URL -> H1 -> Title -> OG Title)
+            # 1. EXTRAÇÃO DE VERSÃO (URL -> H1 -> Title)
             versao_encontrada = (
                 extrair_versao_limpa(url_alvo) or 
                 extrair_versao_limpa(h1_text) or 
@@ -304,7 +318,7 @@ def extrair_link_direto(url_alvo):
             if versao_encontrada:
                 dados_jogo["versao"] = versao_encontrada
 
-            # 2. EXTRAÇÃO DE NOME (Prioridade: H1 -> OG Title -> Page Title -> ID)
+            # 2. EXTRAÇÃO DE NOME
             raw_title = h1_text or og_title or page_title
             dados_jogo["nome"] = limpar_nome_jogo(raw_title, url_alvo)
 
