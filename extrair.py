@@ -1,8 +1,15 @@
 import sys
 import os
 import re
+import json
 import requests
 from playwright.sync_api import sync_playwright
+
+try:
+    from google.oauth2 import service_account
+    import google.auth.transport.requests
+except ImportError:
+    service_account = None
 
 try:
     from playwright_stealth import stealth_sync
@@ -17,9 +24,48 @@ GREEN_API_INSTANCE = os.environ.get("GREEN_API_INSTANCE")
 GREEN_API_TOKEN = os.environ.get("GREEN_API_TOKEN")
 GREEN_API_GROUP_ID = os.environ.get("GREEN_API_GROUP_ID")
 
+GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+
 URL_WORKER = "https://orange-star-d066.claudiokennedymorgy.workers.dev"
 PAGINA_INICIAL_BLOG = "https://k-404modapk.blogspot.com/?m=1"
 FOTO_OFICIAL_SITE = "https://k-404modapk.blogspot.com/favicon.ico"
+
+def notificar_google_indexing_api(url_para_indexar):
+    """Envia solicitação para a Google Indexing API para indexar/atualizar a URL no Google Search."""
+    if not GOOGLE_CREDENTIALS_JSON:
+        print("⚠️ GOOGLE_CREDENTIALS_JSON não configurado nos Secrets. Pulando Google Indexing.")
+        return
+
+    if not service_account:
+        print("⚠️ Módulo 'google-auth' não encontrado. Certifique-se de adicioná-lo no requirements.txt.")
+        return
+
+    try:
+        info = json.loads(GOOGLE_CREDENTIALS_JSON)
+        scopes = ["https://www.googleapis.com/auth/indexing"]
+        credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+        
+        req = google.auth.transport.requests.Request()
+        credentials.refresh(req)
+        token = credentials.token
+
+        endpoint = "https://indexing.googleapis.com/v1/urlNotifications:publish"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}"
+        }
+        payload = {
+            "url": url_para_indexar,
+            "type": "URL_UPDATED"
+        }
+
+        res = requests.post(endpoint, headers=headers, json=payload)
+        if res.status_code == 200:
+            print(f"🚀 Google Indexing API: Solicitada indexação com sucesso para -> {url_para_indexar}")
+        else:
+            print(f"❌ Erro na Google Indexing API ({res.status_code}): {res.text}")
+    except Exception as e:
+        print(f"❌ Erro ao enviar para Google Indexing API: {e}")
 
 def enviar_notificacao_telegram(nome_jogo, versao_jogo, id_jogo):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -218,13 +264,18 @@ def salvar_no_firebase_se_novo(url_origem, link_novo, dados_jogo):
         print(f"❌ Erro ao salvar no Firebase: {e}")
 
     # 2. REGRA ESTRITA DE NOTIFICAÇÃO:
-    # Só dispara para o Telegram e WhatsApp se a VERSÃO for diferente da gravada no Firebase
+    # Só dispara para o Telegram, WhatsApp e Google Indexing se a VERSÃO for diferente da gravada no Firebase
     if versao_atual and versao_atual.strip().lower() == versao_jogo.strip().lower():
         print(f"⏩ Notificação ignorada: A versão de '{id_jogo}' continua a mesma ({versao_jogo}).")
     else:
-        print(f"🔔 VERSÃO MUDOU para '{id_jogo}' ({versao_atual} ➔ {versao_jogo})! Enviando notificações...")
+        print(f"🔔 VERSÃO MUDOU para '{id_jogo}' ({versao_atual} ➔ {versao_jogo})! Enviando notificações e Indexação...")
         enviar_notificacao_telegram(nome_jogo, versao_jogo, id_jogo)
         enviar_notificacao_whatsapp(nome_jogo, versao_jogo, id_jogo)
+        
+        # --- INDEXAÇÃO AUTOMÁTICA NO GOOGLE ---
+        notificar_google_indexing_api(PAGINA_INICIAL_BLOG)
+        if "blogspot.com" in url_origem or "k-404" in url_origem:
+            notificar_google_indexing_api(url_origem)
 
     return id_jogo
 
